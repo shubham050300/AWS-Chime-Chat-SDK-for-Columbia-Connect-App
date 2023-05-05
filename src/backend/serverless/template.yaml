@@ -1,0 +1,1629 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: "AWS::Serverless-2016-10-31"
+Description: AWS CloudFormation stack to set up infrastructure required for the Amazon Chime SDK chat demo app
+Parameters:
+  DemoName:
+    Type: String
+    Default: ChimeSDKMessagingDemo
+    Description: Unique Name for Demo Resources
+  AppInstanceAdminId:
+    Type: String
+    Default: Admin
+    Description: Unique user Id for AppInstanceAdmin
+  FCMServerKey:
+    Type: String
+    Default: ""
+    Description: FCM ServerKey for push notifications
+    NoEcho: true
+  APNSPublicCertificate:
+    Type: String
+    Default: ""
+    Description: APNS Public Certificate for push notifications
+    NoEcho: true
+  APNSPrivateKey:
+    Type: String
+    Default: ""
+    Description: APNS Private Key for push notifications
+    NoEcho: true
+
+Conditions:
+  FCMEnabled:
+    Fn::Not: [Fn::Equals: [Ref: FCMServerKey, '']]
+  APNSEnabled:
+    Fn::Not: [Fn::And: [Fn::Equals: [Ref: APNSPublicCertificate, ''], Fn::Equals: [Ref: APNSPrivateKey, '']]]
+  PushNotificationEnabled:
+    Fn::Or: [Fn::Not: [Fn::Equals: [Ref: FCMServerKey, '']], Fn::Not: [Fn::And: [Fn::Equals: [Ref: APNSPublicCertificate, ''], Fn::Equals: [Ref: APNSPrivateKey, '']]]]
+Resources:
+  #Layer for the latest AWS SDK with Amazon Chime SDK for messaging
+  AWSSDKChimeLayer:
+    Type: AWS::Lambda::LayerVersion
+    Description: The AWS SDK with support for Amazon Chime SDK messaging features.
+    Properties:
+      CompatibleRuntimes:
+        - nodejs14.x
+      Content:
+        S3Bucket: aws-blog-business-productivity-chime-sdk
+        S3Key: chat-sdk-demo/aws-sdk-chime-layer.zip
+
+  # Profanity and DLP processor lambda
+  ProfanityAndDLPProcessor:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Description: "Lambda that processes Chime channel messages for auto moderation"
+      Environment:
+        Variables:
+          DOCUMENT_CLASSIFIER_ENDPOINT: !Sub "arn:aws:comprehend:${AWS::Region}:${AWS::AccountId}:document-classifier-endpoint/profanityfilter"
+      FunctionName: !Sub ${DemoName}-ProfanityAndDLPProcessor
+      Handler: "index.handler"
+      Code:
+          S3Bucket: aws-sdk-chime-channelflowdemo-assets
+          S3Key: ChannelFlowProfanityDLPProcessor.zip
+      MemorySize: 128
+      Role: !GetAtt ProcessorLambdaRole.Arn
+      Runtime: nodejs14.x
+      Timeout: 30
+      Layers:
+        - !Ref AWSSDKChimeLayer
+      TracingConfig:
+        Mode: "PassThrough"
+
+  # Custom presence processor lambda
+  PresenceProcessor:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Description: "Lambda that processes Chime channel events for custom presence"
+      FunctionName: !Sub ${DemoName}-PresenceProcessor
+      Environment:
+        Variables:
+          CHIME_APP_INSTANCE_ADMIN_ID: !Sub ${AppInstanceAdminId}
+      Handler: "index.handler"
+      Code:
+          S3Bucket: aws-blog-business-productivity-chime-sdk
+          S3Key: presence-demo-assets/custom-presence-channel-processor.zip
+      MemorySize: 128
+      Role: !GetAtt PresenceProcessorLambdaRole.Arn
+      Runtime: nodejs14.x
+      Timeout: 30
+      Layers:
+        - !Ref AWSSDKChimeLayer
+      TracingConfig:
+        Mode: "PassThrough"
+
+  ProcessorLambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Path: "/"
+      RoleName: !Sub ${DemoName}-ProcessorLambdaRole
+      AssumeRolePolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+      MaxSessionDuration: 3600
+      Description: "Lambda role with Comprehend and Chime channel flow callback permissions for channel flow demo"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: !Sub ${DemoName}-ProcessorLambda-ComprehendAccess
+          PolicyDocument: |
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Sid": "VisualEditor0",
+                        "Effect": "Allow",
+                        "Action": [
+                            "comprehend:BatchDetectDominantLanguage",
+                            "comprehend:DetectDominantLanguage",
+                            "comprehend:DetectPiiEntities",
+                            "comprehend:DetectSentiment",
+                            "comprehend:ClassifyDocument"
+                        ],
+                        "Resource": "*"
+                    }
+                ]
+            }
+        - PolicyName: !Sub ${DemoName}-ProcessorLambda-ChimeMessagingSDKAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "chime:ChannelFlowCallback"
+                Resource: !Sub "arn:aws:chime:${AWS::Region}:${AWS::AccountId}:app-instance/*"
+
+  PresenceProcessorLambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Path: "/"
+      RoleName: !Sub ${DemoName}-PresenceProcessorLambdaRole
+      AssumeRolePolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+      MaxSessionDuration: 3600
+      Description: "Lambda role with Chime SDK APIs access for custom presence demo"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: !Sub ${DemoName}-PresenceProcessorLambda-ChimeMessagingSDKAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "chime:ChannelFlowCallback"
+                  - "chime:DescribeChannel"
+                  - "chime:UpdateChannel"
+                Resource: !Sub "arn:aws:chime:${AWS::Region}:${AWS::AccountId}:app-instance/*"
+
+  PermissionForChimeToInvokeProfanityAndDLPProcessor:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+      - "ProfanityAndDLPProcessor"
+    Properties:
+      FunctionName: !Sub ${DemoName}-ProfanityAndDLPProcessor
+      Action: "lambda:InvokeFunction"
+      Principal: "messaging.chime.amazonaws.com"
+      SourceAccount: {Ref: "AWS::AccountId"}
+      SourceArn: !Sub "arn:aws:chime:${AWS::Region}:${AWS::AccountId}:app-instance/*"
+
+  PermissionForChimeToInvokePresenceProcessor:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+      - PresenceProcessor
+    Properties:
+      FunctionName: !Sub ${DemoName}-PresenceProcessor
+      Action: "lambda:InvokeFunction"
+      Principal: "messaging.chime.amazonaws.com"
+      SourceAccount: {Ref: "AWS::AccountId"}
+      SourceArn: !Sub "arn:aws:chime:${AWS::Region}:${AWS::AccountId}:app-instance/*"
+
+  # Lambda that creates AWS Chime App Instance and Channel Flow resources as one off on stack creation
+  ChimeAppInstanceLambda:
+    Type: "AWS::Lambda::Function"
+    DependsOn:
+      - ProfanityAndDLPProcessor
+      - PresenceProcessor
+    Properties:
+      Handler: "index.handler"
+      Environment:
+        Variables:
+          PROCESSOR_LAMBDA_ARN: !GetAtt ProfanityAndDLPProcessor.Arn
+          PRESENCE_PROCESSOR_LAMBDA_ARN: !GetAtt PresenceProcessor.Arn
+      Role: !GetAtt LambdaExecuteRole.Arn
+      Runtime: nodejs14.x
+      Timeout: 60
+      Layers:
+        - !Ref AWSSDKChimeLayer
+      Code:
+        ZipFile: >
+          "use strict";
+          const AWS = require("aws-sdk");
+          const uuidv4 = require("uuid");
+          const response = require("cfn-response");
+          AWS.config.update({ region: process.env.AWS_REGION });
+
+          const chimeIdentity = new AWS.ChimeSDKIdentity({ region: process.env.AWS_REGION });
+          const chimeMessaging = new AWS.ChimeSDKMessaging({ region: process.env.AWS_REGION });
+
+          const { PROCESSOR_LAMBDA_ARN, PRESENCE_PROCESSOR_LAMBDA_ARN } = process.env;
+
+          async function createChannelFlow(channelFlowParams) {
+            await chimeMessaging.createChannelFlow(channelFlowParams, function (err, data) {
+              if (err) {
+                console.log('Error calling create channel flow');
+                console.log(err, err.stack);
+              } else {
+                console.log(data); // successful  response
+                return data;
+              }
+
+            }).promise();
+          }
+
+          exports.handler = async (event, context, callback) => {
+            console.log("Event: \n", event);
+            console.log("Create Chime SDK App Instance");
+            if (event["RequestType"] === "Create") {
+              //create a chime app instance
+              const params = {
+                Name: `AWSChimeMessagingSDKDemo-${uuidv4()}`,
+              };
+              try {
+                const appInstance = await chimeIdentity.createAppInstance(
+                  params,
+                  function (err, data) {
+                    if (err) console.log(err, err.stack);
+                    else {
+                      console.log(data);
+                      return data;
+                    }
+                  }
+                ).promise();
+
+                console.log("Creating channel flow resource for Profanity and DLP Flow");
+                await createChannelFlow({
+                  Name: "Profanity and DLP Flow",
+                  ClientRequestToken: `CreateChannelFlow-${uuidv4()}`,
+                  AppInstanceArn: appInstance.AppInstanceArn,
+                  Processors: [{
+                    ExecutionOrder: 1,
+                    Name: "ProfanityAndDLPProcessor",
+                    FallbackAction: 'ABORT',
+                    Configuration: {
+                      Lambda: {
+                        ResourceArn: PROCESSOR_LAMBDA_ARN,
+                        InvocationType: 'ASYNC'
+                      }
+                    }
+                  }]
+                });
+
+                console.log("Creating channel flow resource for Presence");
+                await createChannelFlow({
+                  Name: "Presence Channel Flow",
+                  ClientRequestToken: `CreateChannelFlow-${uuidv4()}`,
+                  AppInstanceArn: appInstance.AppInstanceArn,
+                  Processors: [{
+                    ExecutionOrder: 1,
+                    Name: "PresenceProcessor",
+                    FallbackAction: 'ABORT',
+                    Configuration: {
+                      Lambda: {
+                        ResourceArn: PRESENCE_PROCESSOR_LAMBDA_ARN,
+                        InvocationType: 'ASYNC'
+                      }
+                    }
+                  }]
+                });
+
+                await response.send(event, context, response.SUCCESS, appInstance);
+              } catch (error) {
+                console.log("ERROR CAUGHT \n", error);
+                await response.send(event, context, response.FAILED, {});
+              }
+            } else {
+              //NOT A CREATE REQUEST
+              await response.send(event, context, response.SUCCESS, {});
+            }
+          };
+
+  # Trigger Lambda function to create Amazon Chime App Instance and channel flow creation
+  TriggerChimeAppInstanceLambda:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn:
+      - ProfanityAndDLPProcessor
+      - PresenceProcessor
+    Properties:
+      ServiceToken: !GetAtt ChimeAppInstanceLambda.Arn
+
+  # Lambda that creates AWS Chime App admin user
+  ChimeAppAdminLambda:
+    DependsOn: TriggerChimeAppInstanceLambda
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.handler"
+      Role: !GetAtt LambdaExecuteRole.Arn
+      Runtime: nodejs14.x
+      Timeout: 60
+      Layers:
+        - !Ref AWSSDKChimeLayer
+      Code:
+        ZipFile: >
+          "use strict";
+          const AWS = require("aws-sdk");
+          const uuidv4 = require("uuid");
+          const response = require("cfn-response");
+          AWS.config.update({ region: process.env.AWS_REGION });
+
+          const chimeIdentity = new AWS.ChimeSDKIdentity({ region: process.env.AWS_REGION });
+
+          const { CHIME_APP_INSTANCE_ARN } = process.env;
+
+          exports.handler = async (event, context, callback) => {
+            console.log("Event: \n", event);
+            console.log("Create Chime SDK App Admin");
+            if (event["RequestType"] === "Create") {
+              //create a chime app user
+              const createUserParams = {
+                AppInstanceArn: CHIME_APP_INSTANCE_ARN,
+                AppInstanceUserId: `Admin`,
+                ClientRequestToken: `${uuidv4()}`,
+                Name: `Admin`
+              };
+
+              try {
+                const userResponse = await chimeIdentity.createAppInstanceUser(createUserParams).promise();
+
+                console.log("Successfully created user");
+                console.log(userResponse); // successful response
+              } catch (error) {
+                console.log("ERROR CAUGHT \n", error);
+              }
+
+              //create a chime app admin
+              const createAdminParams = {
+                AppInstanceArn: CHIME_APP_INSTANCE_ARN,
+                AppInstanceAdminArn: CHIME_APP_INSTANCE_ARN + '/user/Admin'
+              };
+
+              try {
+                const adminResponse = await chimeIdentity.createAppInstanceAdmin(createAdminParams).promise();
+
+                console.log("Successfully created user");
+                console.log(adminResponse); // successful response
+                await response.send(event, context, response.SUCCESS, adminResponse);
+              } catch (error) {
+                console.log("ERROR CAUGHT \n", error);
+                await response.send(event, context, response.FAILED, {});
+              }
+            } else if (event["RequestType"] === "DELETE") {
+                          // NOOP as app instance deletion will clean users/admins
+                          await response.send(event, context, response.SUCCESS, {});
+            } else {
+              // NOT A CREATE or DELETE REQUEST
+              // TODO modify??
+              await response.send(event, context, response.FAILED, {});
+            }
+          };
+      Environment:
+        Variables:
+          CHIME_APP_INSTANCE_ARN: !GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn
+
+  # Trigger Lambda function to create Amazon Chime App admin creation
+  TriggerChimeAppAdminLambda:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt ChimeAppAdminLambda.Arn
+
+  # Creates an S3 bucket to store chat attachments
+  ChatAttachmentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+              - HEAD
+              - PUT
+              - POST
+              - DELETE
+            AllowedOrigins:
+              - "*"
+            ExposedHeaders:
+              - "x-amz-server-side-encryption"
+              - "x-amz-request-id"
+              - "x-amz-id-2"
+            MaxAge: "3000"
+
+  #Creates a role to allow SignIn Lambda to execute
+  LambdaExecuteRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${DemoName}-lambdarole
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: !Sub ${DemoName}-LambdaUserCreatePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'chime:CreateAppInstance'
+                  - 'chime:CreateAppInstanceAdmin'
+                  - 'chime:CreateAppInstanceUser'
+                Resource: '*'
+        - PolicyName: !Sub ${DemoName}-LambdaChannelFlowCreatePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'chime:CreateChannelFlow'
+                Resource: !Sub "arn:aws:chime:${AWS::Region}:${AWS::AccountId}:app-instance/*"
+        - PolicyName: !Sub ${DemoName}-LambdaCreateLogGroup
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+  ###
+  ### RESOURCES FOR COGNITO USER POOL AUTHENTICATION
+  ###
+  #Create Lambda used by Cognito Post Authentication Trigger to Create Chime App Instance user if user does not already exist
+  CognitoSignInHookLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: TriggerChimeAppInstanceLambda
+    Properties:
+      FunctionName: !Sub ${DemoName}-SignInHook
+      Handler: "index.handler"
+      Runtime: nodejs14.x
+      MemorySize: 512
+      Role: !GetAtt LambdaExecuteRole.Arn
+      Layers:
+        - !Ref AWSSDKChimeLayer
+      Timeout: 800
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+
+          AWS.config.update({ region: process.env.AWS_REGION });
+
+          const chimeIdentity = new AWS.ChimeSDKIdentity({ region: process.env.AWS_REGION });
+
+          const { CHIME_APP_INSTANCE_ARN } = process.env;
+
+          exports.handler = async (event, context, callback) => {
+            const username = event.userName;
+            const userId = event.request.userAttributes.profile;
+
+            // 'none' is default user profile attribute in Cognito upon registration which
+            if (userId === 'none') {
+              console.log(`User hasn't logged in yet and hasn't been setup with profile`);
+              callback(null, event);
+              return;
+            }
+            // Create a Chime App Instance User for the user
+            const chimeCreateAppInstanceUserParams = {
+              AppInstanceArn: CHIME_APP_INSTANCE_ARN,
+              AppInstanceUserId: userId,
+              Name: username
+            };
+
+            try {
+              console.log(`Creating app instance user for ${userId}`);
+              await chimeIdentity
+                .createAppInstanceUser(chimeCreateAppInstanceUserParams)
+                .promise();
+            } catch (e) {
+              console.log(JSON.stringify(e));
+              return {
+                statusCode: 500,
+                body: e.stack
+              };
+            }
+            // Return to Amazon Cognito
+            callback(null, event);
+          };
+      Environment:
+        Variables:
+          CHIME_APP_INSTANCE_ARN: !GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn
+
+  # Allows Sign In Lambda to be called by Cognito
+  LambdaInvocationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt CognitoSignInHookLambda.Arn
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  # Creates a Cognito User Pool with a Post Authentication Trigger of the Sign In Lambda
+  UserPool:
+    Type: "AWS::Cognito::UserPool"
+    DependsOn: CognitoSignInHookLambda
+    Properties:
+      UserPoolName: !Sub ${DemoName}-user-pool
+      LambdaConfig:
+        PostAuthentication: !GetAtt CognitoSignInHookLambda.Arn
+      AutoVerifiedAttributes:
+        - email
+
+  # Creates a User Pool Client to be used by the identity pool
+  UserPoolClient:
+    Type: "AWS::Cognito::UserPoolClient"
+    Properties:
+      ClientName: !Sub ${DemoName}-client
+      GenerateSecret: false
+      UserPoolId: !Ref UserPool
+
+  #Creates a federated Identity pool
+  IdentityPool:
+    Type: "AWS::Cognito::IdentityPool"
+    Properties:
+      IdentityPoolName: !Sub ${DemoName}-IdentityPool
+      AllowUnauthenticatedIdentities: true
+      CognitoIdentityProviders:
+        - ClientId: !Ref UserPoolClient
+          ProviderName: !GetAtt UserPool.ProviderName
+
+  # Create a role for unauthorized access to AWS resources. Very limited access. Only allows users in the previously created Identity Pool
+  CognitoUnAuthorizedRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Federated: "cognito-identity.amazonaws.com"
+            Action:
+              - "sts:AssumeRoleWithWebIdentity"
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud": !Ref IdentityPool
+              "ForAnyValue:StringLike":
+                "cognito-identity.amazonaws.com:amr": unauthenticated
+      Policies:
+        - PolicyName: !Sub ${DemoName}-CognitoUnauthorizedPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "mobileanalytics:PutEvents"
+                  - "cognito-sync:*"
+                Resource: "*"
+
+  # Create a role for authorized access to AWS resources. Control what your user can access.
+  # Allows users to access their s3 ChatBucket files
+  CognitoAuthorizedRole:
+    Type: "AWS::IAM::Role"
+    Description: The Role Cognito gives users.  Same as AuthLambdaUserRole that credential service gives to users except with cognito sub param
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Federated: "cognito-identity.amazonaws.com"
+            Action:
+              - "sts:AssumeRoleWithWebIdentity"
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud": !Ref IdentityPool
+              "ForAnyValue:StringLike":
+                "cognito-identity.amazonaws.com:amr": authenticated
+      Policies:
+        - PolicyName: !Sub ${DemoName}-AttachmentsS3PermissionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                  - "s3:PutObject"
+                  - "s3:DeleteObject"
+                Resource: !Join ['', ['arn:aws:s3:::', !Ref ChatAttachmentsBucket, '/protected/${cognito-identity.amazonaws.com:sub}/*']]
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                Resource: !Join ['', ['arn:aws:s3:::', !Ref ChatAttachmentsBucket, '/protected/*']]
+        - PolicyName: !Sub ${DemoName}-ChimeSDKDemoUserPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "chime:GetMessagingSessionEndpoint"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "cognito-idp:ListUsers"
+                Resource: !Join ['', ['arn:aws:cognito-idp:us-east-1:', !Ref AWS::AccountId, ':userpool/', !Ref UserPool]]
+              - Effect: "Allow"
+                Action:
+                  - "chime:SendChannelMessage"
+                  - "chime:GetChannelMessage"
+                  - "chime:ListChannelMessages"
+                  - "chime:CreateChannelMembership"
+                  - "chime:ListChannelMemberships"
+                  - "chime:DeleteChannelMembership"
+                  - "chime:CreateChannelModerator"
+                  - "chime:ListChannelModerators"
+                  - "chime:DescribeChannelModerator"
+                  - "chime:RegisterAppInstanceUserEndpoint"
+                  - 'chime:ListAppInstanceUserEndpoints'
+                  - 'chime:DescribeAppInstanceUserEndpoint'
+                  - 'chime:UpdateAppInstanceUserEndpoint'
+                  - 'chime:DeregisterAppInstanceUserEndpoint'
+                  - 'chime:PutChannelMembershipPreferences'
+                  - 'chime:GetChannelMembershipPreferences'
+                  - "chime:CreateChannel"
+                  - "chime:DescribeChannel"
+                  - "chime:ListChannels"
+                  - "chime:UpdateChannel"
+                  - "chime:DeleteChannel"
+                  - "chime:RedactChannelMessage"
+                  - "chime:UpdateChannelMessage"
+                  - "chime:Connect"
+                  - "chime:ListChannelMembershipsForAppInstanceUser"
+                  - "chime:CreateChannelBan"
+                  - "chime:ListChannelBans"
+                  - "chime:DeleteChannelBan"
+                  - "chime:AssociateChannelFlow"
+                  - "chime:DisassociateChannelFlow"
+                  - "chime:DescribeChannelFlow"
+                  - "chime:ListChannelFlows"
+                  - "chime:ListChannelsModeratedByAppInstanceUser"
+                  - "chime:ListSubChannels"
+
+                Resource:
+                  - !Join ['', [!GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn, '/user/${cognito-identity.amazonaws.com:sub}']]
+                  - !Join ['', [!GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn, '/channel/*']]
+                  - !Join ['', [!GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn, '/channel-flow/*']]
+
+  PinpointAccessPolicy:
+    Type: "AWS::IAM::Policy"
+    Condition: PushNotificationEnabled
+    DependsOn: [CognitoAuthorizedRole, AuthLambdaUserRole, AuthLambdaAnonUserRole]
+    Properties:
+      Roles:
+        - !Ref CognitoAuthorizedRole
+        - !Ref AuthLambdaUserRole
+        - !Ref AuthLambdaAnonUserRole
+      PolicyName: !Sub ${DemoName}-PinpointAccessPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "mobiletargeting:GetApp"
+            Resource:
+              - !GetAtt PinpointApplication.Arn
+
+
+  # Assigns the roles to the Identity Pool
+  IdentityPoolRoleMapping:
+    Type: "AWS::Cognito::IdentityPoolRoleAttachment"
+    Properties:
+      IdentityPoolId: !Ref IdentityPool
+      Roles:
+        authenticated: !GetAtt CognitoAuthorizedRole.Arn
+        unauthenticated: !GetAtt CognitoUnAuthorizedRole.Arn
+  ###
+  ### RESOURCES FOR CREDENTIAL EXCHANGE SERVICE
+  ###
+  AuthLambdaIAMRole:
+    Type: AWS::IAM::Role
+    Description: The role for the Credential Exchange Service lambda that gives AWS creds to users runs with
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      Policies:
+        - PolicyName: !Sub ${DemoName}-AuthLambdaLogPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${DemoName}_Auth_Lambda:*
+
+        - PolicyName: !Sub ${DemoName}-AuthLambdaChimePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "chime:CreateAppInstanceUser"
+                  - "chime:CreateAppInstanceAdmin"
+                  - "chime:DescribeAppInstanceUser"
+                  - "chime:DescribeAppInstanceAdmin"
+                Resource:
+                  - !Join ['', [!GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn, '/user/*']]
+
+        - PolicyName: !Sub ${DemoName}-MeetingLambdaChimePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "chime:describeChannel"
+                  - "chime:describeChannelMembership"
+                  - "chime:createMeeting"
+                  - "chime:createAttendee"
+                  - "chime:deleteMeeting"
+                Resource: "*"
+  AuthLambdaUserRole:
+    Description: The Role the lambda parameterizes and returns to the user
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: !GetAtt AuthLambdaIAMRole.Arn
+            Action:
+              - "sts:AssumeRole"
+              - "sts:TagSession"
+      Policies:
+        - PolicyName: !Sub ${DemoName}-CognitoAuthorizedPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "mobileanalytics:PutEvents"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "lambda:InvokeFunction"
+                Resource: "*"
+        - PolicyName: !Sub ${DemoName}-AttachmentsS3PermissionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                  - "s3:PutObject"
+                  - "s3:DeleteObject"
+                Resource: !Join ['', ['arn:aws:s3:::', !GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn, '/protected/${aws:PrincipalTag/UserUUID}/*']]
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                Resource: !Join ['', ['arn:aws:s3:::', !GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn, '/protected/*']]
+        - PolicyName: !Sub ${DemoName}-ChimeSDKDemoUserPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "chime:GetMessagingSessionEndpoint"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "chime:SendChannelMessage"
+                  - "chime:GetChannelMessage"
+                  - "chime:ListChannelMessages"
+                  - "chime:CreateChannelMembership"
+                  - "chime:ListChannelMemberships"
+                  - "chime:DeleteChannelMembership"
+                  - "chime:CreateChannelModerator"
+                  - "chime:ListChannelModerators"
+                  - "chime:DescribeChannelModerator"
+                  - "chime:RegisterAppInstanceUserEndpoint"
+                  - 'chime:ListAppInstanceUserEndpoints'
+                  - 'chime:DescribeAppInstanceUserEndpoint'
+                  - 'chime:UpdateAppInstanceUserEndpoint'
+                  - 'chime:DeregisterAppInstanceUserEndpoint'
+                  - 'chime:PutChannelMembershipPreferences'
+                  - 'chime:GetChannelMembershipPreferences'
+                  - "chime:CreateChannel"
+                  - "chime:DescribeChannel"
+                  - "chime:ListChannels"
+                  - "chime:UpdateChannel"
+                  - "chime:DeleteChannel"
+                  - "chime:RedactChannelMessage"
+                  - "chime:UpdateChannelMessage"
+                  - "chime:Connect"
+                  - "chime:ListChannelMembershipsForAppInstanceUser"
+                  - "chime:CreateChannelBan"
+                  - "chime:ListChannelBans"
+                  - "chime:DeleteChannelBan"
+                Resource:
+                  - !Join ['', [!GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn, '/user/${aws:PrincipalTag/UserUUID}']]
+                  - !Join ['', [!GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn, '/channel/*']]
+              - Effect: "Allow"
+                Action:
+                  - "chime:ListAppInstanceUsers"
+                  - "chime:DescribeAppInstanceUser"
+                Resource:
+                  - !Join ['', [!GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn, '/user/*']]
+  AuthLambdaAnonUserRole:
+    Description: The Role the lambda parameterizes and returns to the user when Anonymous, same as above except no s3 permissions
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: !GetAtt AuthLambdaIAMRole.Arn
+            Action:
+              - "sts:AssumeRole"
+              - "sts:TagSession"
+      Policies:
+        - PolicyName: !Sub ${DemoName}-CognitoAuthorizedPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "mobileanalytics:PutEvents"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "lambda:InvokeFunction"
+                Resource: "*"
+        - PolicyName: !Sub ${DemoName}-ChimeSDKDemoUserPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "chime:GetMessagingSessionEndpoint"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "chime:SendChannelMessage"
+                  - "chime:GetChannelMessage"
+                  - "chime:ListChannelMessages"
+                  - "chime:CreateChannelMembership"
+                  - "chime:ListChannelMemberships"
+                  - "chime:DeleteChannelMembership"
+                  - "chime:CreateChannelModerator"
+                  - "chime:ListChannelModerators"
+                  - "chime:DescribeChannelModerator"
+                  - "chime:RegisterAppInstanceUserEndpoint"
+                  - 'chime:ListAppInstanceUserEndpoints'
+                  - 'chime:DescribeAppInstanceUserEndpoint'
+                  - 'chime:UpdateAppInstanceUserEndpoint'
+                  - 'chime:DeregisterAppInstanceUserEndpoint'
+                  - 'chime:PutChannelMembershipPreferences'
+                  - 'chime:GetChannelMembershipPreferences'
+                  - "chime:CreateChannel"
+                  - "chime:DescribeChannel"
+                  - "chime:ListChannels"
+                  - "chime:UpdateChannel"
+                  - "chime:DeleteChannel"
+                  - "chime:RedactChannelMessage"
+                  - "chime:UpdateChannelMessage"
+                  - "chime:Connect"
+                  - "chime:ListChannelMembershipsForAppInstanceUser"
+                  - "chime:CreateChannelBan"
+                  - "chime:ListChannelBans"
+                  - "chime:DeleteChannelBan"
+                Resource:
+                  - !Join ['', [!GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn, '/user/${aws:PrincipalTag/UserUUID}']]
+                  - !Join ['', [!GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn, '/channel/*']]
+                  - !GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn
+              - Effect: "Allow"
+                Action:
+                  - "chime:ListAppInstanceUsers"
+                  - "chime:DescribeAppInstanceUser"
+                Resource:
+                  - !Join ['', [!GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn, '/user/*']]
+
+  PreflightRequestLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          exports.handler = function(event, context, callback) {
+            let origin = 'https://localhost:9000';
+            if (event.headers["origin"]?.match(/cloudfront.net$/)) {
+                origin = event.headers.origin;
+            }
+            callback(null, {
+              statusCode: 200,
+              headers: {
+                  "Access-Control-Allow-Origin" : origin,
+                  "Access-Control-Allow-Credentials": "true",
+                  "Access-Control-Allow-Methods": "OPTIONS,POST",
+                  'Access-Control-Allow-Headers': 'Authorization',
+              },
+            })
+          }
+      Handler: index.handler
+      Role:
+        Fn::GetAtt:
+          - LambdaExecuteRole
+          - Arn
+      Runtime: nodejs14.x
+      Timeout: 60
+
+  PreflightRequestLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:invokeFunction
+      Principal: apigateway.amazonaws.com
+      FunctionName:
+        Ref: PreflightRequestLambda
+      SourceArn:
+        Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayApi}/*/OPTIONS/*
+
+  ApiGatewayApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Description: "Amazon Chime SDK Chat Demo APIs"
+      StageName: prod
+      DefinitionBody:
+        swagger: "2.0"
+        info:
+          version: "1.0"
+          title: "chime-sdk-chat-demo"
+        schemes:
+          - "https"
+        paths:
+          /create:
+            post:
+              responses: { }
+              x-amazon-apigateway-integration:
+                type: "aws_proxy"
+                httpMethod: "POST"
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${CreateMeetingApiFunction}/invocations
+                passthroughBehavior: "when_no_match"
+            options:
+              responses: { }
+              x-amazon-apigateway-integration:
+                type: "aws_proxy"
+                httpMethod: "POST"
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${PreflightRequestLambda}/invocations
+                responses:
+                  default:
+                    statusCode: "200"
+                passthroughBehavior: "when_no_match"
+                contentHandling: "CONVERT_TO_TEXT"
+          /creds:
+            post:
+              responses: { }
+              x-amazon-apigateway-integration:
+                type: "aws_proxy"
+                httpMethod: "POST"
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${CredApiFunction}/invocations
+                passthroughBehavior: "when_no_match"
+            options:
+              responses: { }
+              x-amazon-apigateway-integration:
+                type: "aws_proxy"
+                httpMethod: "POST"
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${PreflightRequestLambda}/invocations
+                responses:
+                  default:
+                    statusCode: "200"
+                passthroughBehavior: "when_no_match"
+                contentHandling: "CONVERT_TO_TEXT"
+          /end:
+            post:
+              responses: { }
+              x-amazon-apigateway-integration:
+                type: "aws_proxy"
+                httpMethod: "POST"
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${EndMeetingApiFunction}/invocations
+                passthroughBehavior: "when_no_match"
+            options:
+              responses: { }
+              x-amazon-apigateway-integration:
+                type: "aws_proxy"
+                httpMethod: "POST"
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${PreflightRequestLambda}/invocations
+                responses:
+                  default:
+                    statusCode: "200"
+                passthroughBehavior: "when_no_match"
+                contentHandling: "CONVERT_TO_TEXT"
+          /join:
+            post:
+              responses: { }
+              x-amazon-apigateway-integration:
+                type: "aws_proxy"
+                httpMethod: "POST"
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${CreateAttendeeApiFunction}/invocations
+                passthroughBehavior: "when_no_match"
+            options:
+              responses: { }
+              x-amazon-apigateway-integration:
+                type: "aws_proxy"
+                httpMethod: "POST"
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${PreflightRequestLambda}/invocations
+                responses:
+                  default:
+                    statusCode: "200"
+                passthroughBehavior: "when_no_match"
+                contentHandling: "CONVERT_TO_TEXT"
+
+  CredApiFunction: # Adds a POST api endpoint at "/creds" to the ApiGatewayApi via an Api event
+    Type: AWS::Serverless::Function
+    Properties:
+      Role: !GetAtt AuthLambdaIAMRole.Arn
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /creds
+            Method: post
+            RestApiId:
+              Ref: ApiGatewayApi
+      Environment:
+        Variables:
+          ChimeAppInstanceArn: !GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn
+          UserRoleArn: !GetAtt AuthLambdaUserRole.Arn
+          AnonUserRole: !GetAtt AuthLambdaAnonUserRole.Arn
+      Layers:
+        - !Ref AWSSDKChimeLayer
+      Runtime: nodejs14.x
+      Handler: index.handler
+      InlineCode: |
+        // Lambda that validates user tokens and returns AWS Creds for access to chime, scoped to that user
+        const AWS = require('aws-sdk');
+        const uuidv4 = require('uuid');
+
+        AWS.config.update({ region: process.env.AWS_REGION });
+
+        const chimeIdentity = new AWS.ChimeSDKIdentity({ region: process.env.AWS_REGION });
+        const sts = new AWS.STS({ region: process.env.AWS_REGION });
+
+        const APP_INSTANCE_ID = process.env.ChimeAppInstanceArn;
+        const USER_ROLE_ARN = process.env.UserRoleArn;
+        const ANON_USER_ROLE_ARN = process.env.AnonUserRole;
+
+        // STEP 1: Validate your identity providers access token and return user information
+        // including UUID, and optionally username or additional metadata
+        function validateAccessTokenOrCredsAndReturnUser(identityToken) {
+          // For purposes of simulating the exchange, this function defaults to returning anonymous user access.
+          // To authenticate known users add logic to validate your auth token here.  The function
+          // will need to return the users uuid and optionally display name and/or other metadata
+          const randomUserID = `anon_${uuidv4()}`;
+          return {
+            uuid: randomUserID,
+            displayName: randomUserID,
+            metadata: null
+          };
+        }
+
+        // STEP 2: get AWS Creds by calling assumeRole with the user info returned
+        // in step one.
+        async function assumeRole(user) {
+          const assumedRoleResponse = await sts.assumeRole({
+            RoleArn: ANON_USER_ROLE_ARN, // Give anonymous permissions
+            RoleSessionName: `chime_${user.uuid}`,
+            DurationSeconds: '3600', // 1 hour, often want to set this to the duration of access token from IdP
+            Tags: [{
+              Key: 'UserUUID', // parameterizes IAM Role with users UUID
+              Value: user.uuid
+            }]
+          }).promise();
+          return assumedRoleResponse.Credentials;  // returns AWS Creds
+        }
+
+        // STEP 3: Create or get user in Chime (create is NOOP if already exists)
+        async function createOrGetChimeUserArn(user) {
+          const createUserResponse = await chimeIdentity
+            .createAppInstanceUser({
+              AppInstanceArn: APP_INSTANCE_ID,
+              AppInstanceUserId: user.uuid,
+              ClientRequestToken: uuidv4(),
+              Name: user.displayName
+            })
+            .promise();
+
+          return createUserResponse.AppInstanceUserArn;
+        }
+
+        // MAIN, call above in order
+        exports.handler = async event => {
+          let origin = 'https://localhost:9000';
+          if (event.headers["origin"]?.match(/cloudfront.net$/)) {
+             origin = event.headers.origin;
+          }
+
+          const method = event.httpMethod;
+          const { path } = event;
+          const authToken = event.headers.Authorization;
+
+          let creds = null;
+
+          try {
+            const user = validateAccessTokenOrCredsAndReturnUser(authToken);
+
+            if (user !== null) {
+              creds = await assumeRole(user);
+              const userArn = await createOrGetChimeUserArn(user);
+              return {
+                statusCode: 200,
+                headers: {
+                  'Access-Control-Allow-Headers': 'Authorization',
+                  'Access-Control-Allow-Origin': origin,
+                  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+                  'Access-Control-Allow-Credentials': 'true'
+                },
+                body: JSON.stringify({
+                  ChimeAppInstanceUserArn: userArn,
+                  ChimeUserId: user.uuid,
+                  ChimeCredentials: creds,
+                  ChimeDisplayName: user.displayName
+                })
+              };
+            }
+          } catch (err) {
+            console.log(`ERROR: unexpected exception ${err}`);
+          }
+
+          // Default response to not authorized
+          return {
+            statusCode: 401,
+            headers: {
+              'Access-Control-Allow-Headers': 'Authorization',
+              'Access-Control-Allow-Origin': origin,
+              'Access-Control-Allow-Methods': 'POST, OPTIONS',
+              'Access-Control-Allow-Credentials': 'true'
+            },
+            body: 'Not Authorized'
+          };
+        };
+
+  ###
+  ### RESOURCES FOR MEETING SERVER
+  ###
+
+  CreateMeetingApiFunction: # Adds a POST api endpoint at "/create" to create meetings
+    Type: AWS::Serverless::Function
+    Properties:
+      Role: !GetAtt AuthLambdaIAMRole.Arn
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /create
+            Method: POST
+            RestApiId:
+              Ref: ApiGatewayApi
+      Environment:
+        Variables:
+          ChimeAppInstanceArn: !GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn
+      Layers:
+        - !Ref AWSSDKChimeLayer
+      Runtime: nodejs14.x
+      Handler: index.handler
+      InlineCode: |
+        const AWS = require('aws-sdk');
+        const uuidv4 = require('uuid');
+        const chime = new AWS.Chime({ region: 'us-east-1' });
+        const chimeMessaging = new AWS.ChimeSDKMessaging({ region: process.env.AWS_REGION });
+
+        const APP_INSTANCE_ID = process.env.ChimeAppInstanceArn;
+
+        const serverAdminUserId = 'Admin';
+        const serverAdminArn = `${APP_INSTANCE_ID}/user/${serverAdminUserId}`;
+        const appInstanceUserArnHeader = 'x-amz-chime-bearer';
+
+        exports.handler = async event => {
+          let origin = 'https://localhost:9000';
+          if (event.headers["origin"]?.match(/cloudfront.net$/)) {
+             origin = event.headers.origin;
+          }
+
+          const { userId, channel, name } = event.queryStringParameters;
+          const region = 'us-east-1';
+
+          console.info('Validating channel');
+          const describeChannelParams = {
+            ChannelArn: channel,
+            ChimeBearer: serverAdminArn
+          };
+
+          const describeChanneRequest = await chimeMessaging.describeChannel(describeChannelParams);
+          describeChanneRequest.on('build', function() {
+            describeChanneRequest.httpRequest.headers[appInstanceUserArnHeader] = serverAdminArn;
+          });
+          const describeChannelResponse = await describeChanneRequest.promise();
+
+          if (!describeChannelResponse.Channel) {
+            return {
+              statusCode: 404,
+              headers: {
+                'Access-Control-Allow-Headers': 'Authorization',
+                'Access-Control-Allow-Origin': origin,
+                'Access-Control-Allow-Methods': 'POST, OPTIONS',
+                'Access-Control-Allow-Credentials': 'true'
+              },
+              body: 'Meeting channel does not exist'
+            };
+          }
+
+          console.info('Validating membership');
+          const describeChannelMembershipParams = {
+            ChannelArn: channel,
+            MemberArn:  `${APP_INSTANCE_ID}/user/${userId}`,
+            ChimeBearer: serverAdminArn
+          };
+
+          const describeChannelMembershipRequest = await chimeMessaging.describeChannelMembership(describeChannelMembershipParams);
+          describeChannelMembershipRequest.on('build', function() {
+            describeChannelMembershipRequest.httpRequest.headers[appInstanceUserArnHeader] = serverAdminArn;
+          });
+          const describeChannelMembershipResponse = await describeChannelMembershipRequest.promise();
+
+          if (!describeChannelMembershipResponse.ChannelMembership) {
+            return {
+              statusCode: 403,
+              headers: {
+                'Access-Control-Allow-Headers': 'Authorization',
+                'Access-Control-Allow-Origin': origin,
+                'Access-Control-Allow-Methods': 'POST, OPTIONS',
+                'Access-Control-Allow-Credentials': 'true'
+              },
+              body: 'User is not a member of meeting channel'
+            };
+          }
+
+          console.info('Creating new meeting before joining');
+          const createMeetingRequest = {
+            ClientRequestToken: uuidv4(),
+            MediaRegion: region,
+          };
+          const meetingInfo = await chime.createMeeting(createMeetingRequest).promise();
+
+          console.info('Adding new attendee');
+          const attendeeInfo = (await chime.createAttendee({
+              MeetingId: meetingInfo.Meeting.MeetingId,
+              ExternalUserId: name,
+            }).promise());
+
+          const joinInfo = {
+            JoinInfo: {
+              Meeting: meetingInfo.Meeting,
+              Attendee: attendeeInfo.Attendee
+            },
+          };
+
+          return {
+            statusCode: 200,
+            headers: {
+              'Access-Control-Allow-Headers': 'Authorization',
+              'Access-Control-Allow-Origin': origin,
+              'Access-Control-Allow-Methods': 'POST, OPTIONS',
+              'Access-Control-Allow-Credentials': 'true'
+            },
+            body: JSON.stringify(joinInfo, '', 2)
+          };
+        };
+
+  CreateAttendeeApiFunction: # Adds a POST api endpoint at "/join" to join meetings as an attendee
+    Type: AWS::Serverless::Function
+    Properties:
+      Role: !GetAtt AuthLambdaIAMRole.Arn
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /join
+            Method: POST
+            RestApiId:
+              Ref: ApiGatewayApi
+      Environment:
+        Variables:
+          ChimeAppInstanceArn: !GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn
+      Layers:
+        - !Ref AWSSDKChimeLayer
+      Runtime: nodejs14.x
+      Handler: index.handler
+      InlineCode: |
+        const AWS = require('aws-sdk');
+        const uuidv4 = require('uuid');
+        const chime = new AWS.Chime({ region: 'us-east-1' });
+        const chimeMessaging = new AWS.ChimeSDKMessaging({ region: process.env.AWS_REGION });
+
+        const APP_INSTANCE_ID = process.env.ChimeAppInstanceArn;
+
+        const serverAdminUserId = 'Admin';
+        const serverAdminArn = `${APP_INSTANCE_ID}/user/${serverAdminUserId}`;
+        const appInstanceUserArnHeader = 'x-amz-chime-bearer';
+
+        exports.handler = async event => {
+          let origin = 'https://localhost:9000';
+          if (event.headers["origin"]?.match(/cloudfront.net$/)) {
+             origin = event.headers.origin;
+          }
+
+          const { userId, channel, name, meeting } = event.queryStringParameters;
+          const region = 'us-east-1';
+
+          console.info('Validating channel');
+          const describeChannelParams = {
+            ChannelArn: channel,
+            ChimeBearer: serverAdminArn
+          };
+
+          const describeChanneRequest = await chimeMessaging.describeChannel(describeChannelParams);
+          describeChanneRequest.on('build', function() {
+            describeChanneRequest.httpRequest.headers[appInstanceUserArnHeader] = serverAdminArn;
+          });
+          const describeChannelResponse = await describeChanneRequest.promise();
+
+          if (!describeChannelResponse.Channel) {
+            return {
+              statusCode: 404,
+              headers: {
+                'Access-Control-Allow-Headers': 'Authorization',
+                'Access-Control-Allow-Origin': origin,
+                'Access-Control-Allow-Methods': 'POST, OPTIONS',
+                'Access-Control-Allow-Credentials': 'true'
+              },
+              body: 'Meeting channel does not exist'
+            };
+          }
+
+          console.info('Validating membership');
+          const describeChannelMembershipParams = {
+            ChannelArn: channel,
+            MemberArn:  `${APP_INSTANCE_ID}/user/${userId}`,
+            ChimeBearer: serverAdminArn
+          };
+
+          const describeChannelMembershipRequest = await chimeMessaging.describeChannelMembership(describeChannelMembershipParams);
+          describeChannelMembershipRequest.on('build', function() {
+            describeChannelMembershipRequest.httpRequest.headers[appInstanceUserArnHeader] = serverAdminArn;
+          });
+          const describeChannelMembershipResponse = await describeChannelMembershipRequest.promise();
+
+          if (!describeChannelMembershipResponse.ChannelMembership) {
+            return {
+              statusCode: 403,
+              headers: {
+                'Access-Control-Allow-Headers': 'Authorization',
+                'Access-Control-Allow-Origin': origin,
+                'Access-Control-Allow-Methods': 'POST, OPTIONS',
+                'Access-Control-Allow-Credentials': 'true'
+              },
+              body: 'User is not a member of meeting channel'
+            };
+          }
+
+          const meetingInfo = JSON.parse(meeting);
+
+          console.info('Adding new attendee');
+          const attendeeInfo = (await chime.createAttendee({
+              MeetingId: meetingInfo.MeetingId,
+              ExternalUserId: name,
+            }).promise());
+
+          const joinInfo = {
+            JoinInfo: {
+              Meeting: meetingInfo,
+              Attendee: attendeeInfo.Attendee
+            },
+          };
+
+          return {
+            statusCode: 200,
+            headers: {
+              'Access-Control-Allow-Headers': 'Authorization',
+              'Access-Control-Allow-Origin': origin,
+              'Access-Control-Allow-Methods': 'POST, OPTIONS',
+              'Access-Control-Allow-Credentials': 'true'
+            },
+            body: JSON.stringify(joinInfo, '', 2)
+          };
+        };
+
+  EndMeetingApiFunction: # Adds a POST api endpoint at "/join" to join meetings as an attendee
+    Type: AWS::Serverless::Function
+    Properties:
+      Role: !GetAtt AuthLambdaIAMRole.Arn
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /end
+            Method: POST
+            RestApiId:
+              Ref: ApiGatewayApi
+      Environment:
+        Variables:
+          ChimeAppInstanceArn: !GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn
+      Layers:
+        - !Ref AWSSDKChimeLayer
+      Runtime: nodejs14.x
+      Handler: index.handler
+      InlineCode: |
+        const AWS = require('aws-sdk');
+        const chime = new AWS.Chime({ region: 'us-east-1' });
+
+        exports.handler = async event => {
+          const meetingId = event.queryStringParameters.meetingId;
+
+          console.info('Deleting meeting');
+          await chime
+          .deleteMeeting({
+            MeetingId: meetingId
+          })
+          .promise();
+
+          let origin = 'https://localhost:9000';
+          if (event.headers["origin"]?.match(/cloudfront.net$/)) {
+             origin = event.headers.origin;
+          }
+
+          return {
+            statusCode: 200,
+            headers: {
+              'Access-Control-Allow-Headers': 'Authorization',
+              'Access-Control-Allow-Origin': origin,
+              'Access-Control-Allow-Methods': 'POST, OPTIONS',
+              'Access-Control-Allow-Credentials': 'true'
+            },
+            body: ''
+          };
+        };
+
+  PinpointApplication:
+    Type: AWS::Pinpoint::App
+    Condition: PushNotificationEnabled
+    Properties:
+      Name: !Sub ${DemoName}-PushNotifications
+
+  PinpointFCMChannel:
+    Type: AWS::Pinpoint::GCMChannel
+    DependsOn: PinpointApplication
+    Condition: FCMEnabled
+    Properties:
+      ApiKey: !Ref FCMServerKey
+      ApplicationId: !Ref PinpointApplication
+      Enabled: true
+
+  PinpointAPNSSandboxChannel:
+    Type: AWS::Pinpoint::APNSSandboxChannel
+    DependsOn: PinpointApplication
+    Condition: APNSEnabled
+    Properties:
+      ApplicationId: !Ref PinpointApplication
+      Certificate: !Ref APNSPublicCertificate
+      PrivateKey: !Ref APNSPrivateKey
+      Enabled: true
+
+  PushNotificationServiceRole:
+    Description: The role assumed by Amazon Chime SDK to send push notifications
+    Type: "AWS::IAM::Role"
+    Condition: PushNotificationEnabled
+    Properties:
+      RoleName: "ServiceRoleForAmazonChimePushNotification"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "messaging.chime.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub ${DemoName}-PinpointAccessPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "mobiletargeting:SendMessages"
+                Resource:
+                  - !Join ['', [!GetAtt PinpointApplication.Arn, '/messages']]
+
+  s3BucketForAssets:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      WebsiteConfiguration:
+        IndexDocument: chat.html
+        ErrorDocument: error.html
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  s3BucketForAssetsPolicy:
+    Type: AWS::S3::BucketPolicy
+    DependsOn:
+      - s3BucketForAssets
+      - CloudFrontDistributionAccessIdentity
+    Properties:
+      Bucket: !Ref s3BucketForAssets
+      PolicyDocument:
+        Statement:
+          - Action:
+              - 's3:GetObject'
+            Effect: 'Allow'
+            Principal:
+              CanonicalUser:
+                Fn::GetAtt:
+                  [CloudFrontDistributionAccessIdentity, S3CanonicalUserId]
+            Resource: !Sub ${s3BucketForAssets.Arn}/*
+          - Action: 's3:*'
+            Resource: !Sub ${s3BucketForAssets.Arn}/*
+            Effect: Deny
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+            Principal: '*'
+          - Action: 's3:*'
+            Resource: !Sub ${s3BucketForAssets.Arn}/*
+            Effect: Deny
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+            Principal: '*'
+
+  CloudFrontDistributionAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: 'CloudFront OAI for the chat demo app'
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn:
+      - s3BucketForAssets
+    Properties:
+      DistributionConfig:
+        Origins:
+          - DomainName: !GetAtt
+              - s3BucketForAssets
+              - DomainName
+            Id: !Ref DemoName
+            S3OriginConfig:
+              OriginAccessIdentity: !Join
+                - ''
+                - - 'origin-access-identity/cloudfront/'
+                  - !Ref CloudFrontDistributionAccessIdentity
+        Enabled: True
+        Comment: CloudFront for the chat demo app
+        DefaultRootObject: chat.html
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # Managed-CachingDisabled
+          TargetOriginId: !Ref DemoName
+          ForwardedValues:
+            QueryString: true
+            Cookies:
+              Forward: all
+          ViewerProtocolPolicy: redirect-to-https
+        PriceClass: PriceClass_100
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W70
+            reason: This is using Cloudfront default TLS, can be changed by customer if needed.
+
+Outputs:
+  cognitoUserPoolId:
+    Value: !Ref UserPool
+  cognitoAppClientId:
+    Value: !Ref UserPoolClient
+  cognitoIdentityPoolId:
+    Value: !Ref IdentityPool
+  appInstanceArn:
+    Value: !GetAtt TriggerChimeAppInstanceLambda.AppInstanceArn
+  attachmentsS3BucketName:
+    Value: !Ref ChatAttachmentsBucket
+  apiGatewayInvokeUrl:
+    Value: !Sub https://${ApiGatewayApi}.execute-api.us-east-1.amazonaws.com/prod/
+  pinpointApplicationArn:
+    Condition: PushNotificationEnabled
+    Value: !GetAtt PinpointApplication.Arn
+  assetsS3BucketName:
+    Value: !Ref s3BucketForAssets
+  cloudfrontEndpoint:
+    Value: !Join
+      - ''
+      - - 'https://'
+        - !GetAtt [CloudFrontDistribution, DomainName]
+        - '/chat.html'
