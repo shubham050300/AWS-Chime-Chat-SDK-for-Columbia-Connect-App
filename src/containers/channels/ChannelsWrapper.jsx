@@ -1530,7 +1530,7 @@ const ChannelsWrapper = () => {
       <div className="channel-list-wrapper">
         {activeView != 'Moderator' ? (
           <div className="channel-list-header">
-            <div className="channel-list-header-title">Channels</div>
+            <div className="channel-list-header-title">Chat Channels</div>
             <IconButton
               className="create-channel-button channel-options"
               onClick={() => setModal('NewChannel')}

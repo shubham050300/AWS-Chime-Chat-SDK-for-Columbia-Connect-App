@@ -149,7 +149,7 @@ async function listAppInstanceUsers(appInstanceArn, userId, nextToken = null) {
   const params = {
     AppInstanceArn: appInstanceArn,
     NextToken: nextToken,
-    ChimeBearer: chimeBearerArn,
+    // ChimeBearer: chimeBearerArn,
   };
 
   const request = (await chimeIdentityClient()).listAppInstanceUsers(params);
