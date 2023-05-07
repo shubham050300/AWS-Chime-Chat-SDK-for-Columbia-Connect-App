@@ -129,7 +129,9 @@ const Channels = () => {
           }}
           className="app-heading"
         >
-          {activeView === 'Moderator' && moderatedChannel.Name} Columbia Connect Chat App
+          {activeView === 'Moderator' && moderatedChannel.Name}
+          <span style={{color: 'white', marginRight: '12px'}}>Columbia</span>
+          <span style={{color: 'white', marginRight: '12px'}}>Connect</span>
           <div className="user-block">
             <a className="user-info" href="#">
               {member.username || 'Unknown'}

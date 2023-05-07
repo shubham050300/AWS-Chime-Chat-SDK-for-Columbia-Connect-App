@@ -36,12 +36,13 @@ const Signin = () => {
           <Heading
               level={1}
               style={{
-                backgroundColor: 'darkblue',
-                height: '3rem',
+                backgroundColor: 'aliceblue',
+                height: '100px',
               }}
               className="app-heading"
           >
-            Columbia Connect Chat App
+            <span style={{color: '#6fa3bd', marginRight: '12px', fontSize: '32px'}}>Columbia Connect</span>
+          <span style={{color: '#0033A0', marginRight: '12px', fontSize: '32px'}}>Chat App</span>
           </Heading>
         </Cell>
         <Cell gridArea="main">
